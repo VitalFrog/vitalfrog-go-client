@@ -71,7 +71,7 @@ func (c Client) postJSON(path string, in interface{}, out interface{}) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("invalid statuscode. got %q, but expected a 2xx. Body %q", resp.StatusCode, string(body))
+		return fmt.Errorf("invalid statuscode. got %d, but expected a 2xx. Body %q", resp.StatusCode, string(body))
 	}
 
 	err = json.Unmarshal(body, out)
