@@ -1,159 +1,310 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"github.com/VitalFrog/vitalfrog-go-client/api_client"
-	"github.com/alecthomas/kong"
+	"github.com/VitalFrog/vitalfrog-go-client/vfrogapi"
+	"github.com/fatih/color"
 	log "github.com/sirupsen/logrus"
+	"github.com/vitalfrog/termtable"
+	"os"
 	"strings"
+	"time"
 )
 
-var cli struct {
-	APIBaseUrl string `kong:"default='https://api.vitalfrog.com/v2',env='API_BASE_URL',help='API Address of the VitalFrog api'"`
-	APIToken   string `kong:"required,env='API_TOKEN',help='Your VitalFrog api token'"`
-
-	AllowedCountries []string `kong:"env='ALLOWED_COUNTRIES',help='Which countries to test from. Either ALLOWED_COUNTRIES or BlOCKED_COUNTRIES can be set, not both.'"`
-	BlockedCountries []string `kong:"env='BlOCKED_COUNTRIES',help='Which countries NOT to test from. Either ALLOWED_COUNTRIES or BlOCKED_COUNTRIES can be set, not both.'"`
-
-	PerformanceBudgetsId int32    `kong:"env='PERFORMANCE_BUDGETS_ID',help='Performance budgets to use. If not defined falls back to VitalFrog default.'"`
-	Devices              []string `kong:"env='DEVICES',help='Which devices you want to test for. If not set falls back to desktop & mobile'"`
-
-	TargetHost       string   `kong:"required,env='TARGET_HOST',help='Host of url you want to test'"`
-	TargetSchemeHost string   `kong:"default='https',enum='https,http',env='TARGET_SCHEMA',help='What schema (http|https) to use on target host'"`
-	TargetPaths      []string `kong:"required,env='TARGET_PATHS',help='Paths to test'"`
-
-	BasicAuthUsername string `kong:"env='BASIC_AUTH_USERNAME',help='Username to use for basic auth. If configured, then BASIC_AUTH_PASSWORD must also be set'"`
-	BasicAuthPassword string `kong:"env='BASIC_AUTH_PASSWORD',help='Password to use for basic auth. If configured, then BASIC_AUTH_USERNAME must also be set'"`
-
-	ExtraHeaders map[string]string `kong:"env='EXTRA_HEADERS',help='Additional headers to set on the request. Mostly used for auth reasons'"`
-
-	RunAsync bool   `kong:"env='RUN_ASYNC',help='Configure if the request should run async, to not block execution. Report must be checked in browser then later'"`
-	LogLevel string `kong:"default='info',enum='error,info,debug',env='LOG_LEVEL',help='Log level'"`
-}
-
 func main() {
-	kong.Parse(&cli)
-	err := cliCheck()
+	fmt.Println(vitalFrogHeaderText)
+
+	//
+	// Parse config struct
+	cfg, err := parseEnvironmentToConfig()
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
 
-	c := api_client.New(cli.APIBaseUrl, cli.APIToken)
+	//
+	// Create new report
+	vfAPI := vfrogapi.New(cfg.APIBaseUrl, cfg.APIToken)
+	reportConfig := cfg.ToReportConfig()
 
-	reportConfig := api_client.ReportConfig{
-		Countries:            nil,
-		Devices:              nil,
-		PerformanceBudgetsId: nil,
-		Http:                 nil,
-		Target: api_client.Target{
-			Host:   cli.TargetHost,
-			Scheme: &cli.TargetSchemeHost,
-			Paths: api_client.ManualPathSelection{
-				Mode:  "manual",
-				Paths: cli.TargetPaths,
+	var metadata *vfrogapi.ReportMetadata
+	var reportsChan chan vfrogapi.PerformanceReport
+	if cfg.RunAsync {
+		report, err := vfAPI.CreateAsyncReport(reportConfig)
+		if err != nil {
+			log.Fatalf("Could not CreateAsyncReport: %s", err)
+		}
+		metadata = &report.Metadata
+	} else {
+		metadata, reportsChan, err = vfAPI.CreateSyncReport(reportConfig)
+		if err != nil {
+			log.Fatalf("Could not CreateSyncReport: %s", err)
+		}
+	}
+
+	if metadata == nil {
+		log.Fatalf("Did get nil metadata as response from VitalFrog API. This is not valid.")
+	}
+
+	//
+	// Load reports performance budgets for later coloring of the cli
+	var performanceBudgets *vfrogapi.PerformanceBudgets
+	if metadata.Config.PerformanceBudgetsId != nil {
+		performanceBudgets, err = vfAPI.GetPerformanceBudgets(*metadata.Config.PerformanceBudgetsId)
+		if err != nil {
+			log.Fatalf("could not GetPerformanceBudgets: %s", err)
+		}
+	}
+
+	//
+	// Print basic info
+	fmt.Print("\n----------\n")
+	fmt.Printf("\nCreated at %s\n", metadata.Created.Format(time.RFC822))
+	fmt.Printf("Costs %d tokens\n", metadata.Cost)
+	fmt.Printf("Report web url https://app.vitalfrog.com/report/%s\n", metadata.Uuid)
+	fmt.Print("\n----------\n")
+
+	//
+	// Write performance report table to cli
+	// Only write table if we have sync report
+	if reportsChan != nil {
+		tt := termtable.New(os.Stdout, " | ")
+		tt.WriteHeader([]termtable.HeaderField{
+			{
+				Field: termtable.NewStringField("Path"),
 			},
-		},
+			{
+				Field: termtable.NewStringField("Country"),
+				Width: termtable.IntPointer(4),
+			},
+			{
+				Field: termtable.NewStringField("Device"),
+				Width: termtable.IntPointer(10),
+			},
+			{
+				Field: termtable.NewStringField("Max First Input Delay"),
+				Width: termtable.IntPointer(10),
+			},
+			{
+				Field: termtable.NewStringField("Server response time"),
+				Width: termtable.IntPointer(10),
+			},
+			{
+				Field: termtable.NewStringField("Time to interactive"),
+				Width: termtable.IntPointer(10),
+			},
+			{
+				Field: termtable.NewStringField("Cumulative Layout Shift"),
+				Width: termtable.IntPointer(40),
+			},
+			{
+				Field: termtable.NewStringField("Largest Contentful Paint"),
+				Width: termtable.IntPointer(40),
+			},
+		})
+		tt.WriteRowDivider('=')
+
+		//
+		// Get budgets from channel and write them as table rows
+		// If highestBudgetLevel is 2, return os.Exit(1). To trigger CI failure
+		highestBudgetLevel := writeBudgetRows(tt, reportsChan, performanceBudgets)
+		defer func(highestBudgetLevel int) {
+			switch highestBudgetLevel {
+			case 0:
+				color.New(color.FgGreen).Print("All metrics are in a good shape. Nothing to do.")
+			case 1:
+				color.New(color.FgYellow).Print("You have a few metrics which you should look at as they are in the warning state. Please check above table.")
+			case 2:
+				color.New(color.FgRed).Print("Got at least one metric which is not within an acceptable performance budget. Please check above table")
+				os.Exit(1)
+			}
+		}(highestBudgetLevel)
 	}
-	if len(cli.AllowedCountries) > 0 || len(cli.BlockedCountries) > 0 {
-		// Configure allow list
-		newCountries := api_client.Countries{
-			List: make([]api_client.Country, 0),
-			Mode: api_client.AllowList,
-		}
-		if len(cli.BlockedCountries) > 0 {
-			newCountries.Mode = api_client.BlockList
-		}
-		for _, c := range cli.AllowedCountries {
-			newCountries.List = append(newCountries.List, api_client.Country{
-				Code: c,
-			})
-		}
-		reportConfig.Countries = &newCountries
+
+	//
+	// Write report summary footer
+	if jsonConfig, err := json.Marshal(metadata.Config); err == nil {
+		fmt.Printf("\n----------\n\nConfig:\n%s\n", string(jsonConfig))
+	} else {
+		fmt.Printf("\n----------\n\nConfig:\n%+v\n", metadata.Config)
 	}
-	if len(cli.Devices) > 0 {
-		newDevices := make([]api_client.Device, 0)
-		for _, d := range cli.Devices {
-			switch d {
-			case string(api_client.Mobile):
-				newDevices = append(newDevices, api_client.Device{Name: api_client.Mobile})
-			case string(api_client.Desktop):
-				newDevices = append(newDevices, api_client.Device{Name: api_client.Desktop})
+
+	if performanceBudgets != nil {
+		if jsonBudgets, err := json.Marshal(performanceBudgets.Budgets); err == nil {
+			fmt.Printf("\nPerformance Budgets:\n%s\n\n----------\n", string(jsonBudgets))
+		} else {
+			fmt.Printf("\nPerformance Budgets:\n%+v\n\n----------\n", performanceBudgets.Budgets)
+		}
+	}
+
+}
+
+func writeBudgetRows(tt *termtable.TermTable,
+	reportsChan chan vfrogapi.PerformanceReport,
+	performanceBudgets *vfrogapi.PerformanceBudgets) int {
+	highestBudgetLevel := 0
+	for report := range reportsChan {
+		lcp := fmt.Sprintf("%dms", report.LargestContentfulPaint.ValueMs)
+		fid := fmt.Sprintf("%dms", report.MaxPotentialFidMs)
+		cls := fmt.Sprintf("%f", report.CumulativeLayoutShift.Value)
+		serverResponseTime := fmt.Sprintf("%dms", report.ServerResponseTimeMs)
+		interactive := fmt.Sprintf("%dms", report.InteractiveMs)
+
+		lcpColor := white
+		fidColor := white
+		clsColor := white
+		serverResponseTimeColor := white
+		interactiveColor := white
+
+		for _, budget := range performanceBudgets.Budgets {
+			compare := func(value int32) (*color.Color, int) {
+				return compareValueAgainstBudget(value, budget)
+			}
+			var highestBudget int
+			switch budget.Metric {
+			case vfrogapi.PerformanceBudgetMetricLargestContentfulPaintMs:
+				lcpColor, highestBudget = compare(report.LargestContentfulPaint.ValueMs)
+			case vfrogapi.PerformanceBudgetMetricMaxPotentialFidMs:
+				fidColor, highestBudget = compare(report.MaxPotentialFidMs)
+			case vfrogapi.PerformanceBudgetMetricCumulativeLayoutShift:
+				clsColor, highestBudget = compare(int32(report.CumulativeLayoutShift.Value * 100))
+			case vfrogapi.PerformanceBudgetMetricServerResponseTimeMs:
+				serverResponseTimeColor, highestBudget = compare(report.ServerResponseTimeMs)
+			case vfrogapi.PerformanceBudgetMetricInteractiveMs:
+				interactiveColor, highestBudget = compare(report.InteractiveMs)
+			}
+
+			if highestBudget > highestBudgetLevel {
+				highestBudgetLevel = highestBudget
 			}
 		}
-		reportConfig.Devices = &newDevices
-	}
-	if cli.PerformanceBudgetsId != 0 {
-		reportConfig.PerformanceBudgetsId = &cli.PerformanceBudgetsId
-	}
-	if cli.BasicAuthPassword != "" || len(cli.ExtraHeaders) > 0 {
-		newHttp := api_client.HttpConfig{}
-		if cli.BasicAuthPassword != "" {
-			newHttp.BasicAuth = &api_client.BasicAuth{
-				Password: cli.BasicAuthPassword,
-				Username: cli.BasicAuthUsername,
+
+		tt.WriteRow([]termtable.Field{
+			termtable.NewStringField(report.Path),
+			termtable.NewStringField(report.Country.Code),
+			termtable.NewStringField(string(report.Device.Name)),
+			termtable.NewColorField(lcp, lcpColor),
+			termtable.NewColorField(fid, fidColor),
+			termtable.NewColorField(cls, clsColor),
+			termtable.NewColorField(serverResponseTime, serverResponseTimeColor),
+			termtable.NewColorField(interactive, interactiveColor),
+		})
+
+		lcpSelectorElements := strings.Split(report.LargestContentfulPaint.Element.Selector, ">")
+		for k, v := range lcpSelectorElements {
+			arrow := ">"
+			if k == 0 {
+				arrow = ""
+			}
+			lcpSelectorElements[k] = fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v))
+		}
+		var clsSelectorElements []string
+
+		if report.CumulativeLayoutShift.Elements != nil {
+			for _, el := range *report.CumulativeLayoutShift.Elements {
+				elements := strings.Split(el.Selector, ">")
+				for k, v := range elements {
+					arrow := ">"
+					if k == 0 {
+						arrow = ""
+					}
+					clsSelectorElements = append(clsSelectorElements, fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v)))
+				}
 			}
 		}
-		if len(cli.ExtraHeaders) > 0 {
-			extraHeaders := make(api_client.ExtraHeadersConfig, 0)
-			for header, value := range cli.ExtraHeaders {
-				extraHeaders = append(extraHeaders, api_client.Header{
-					Header: header,
-					Value:  value,
+
+		for k := 0; k < maxInt(len(lcpSelectorElements), len(clsSelectorElements)); k++ {
+			switch {
+			case k < len(lcpSelectorElements) && k < len(clsSelectorElements):
+				// Both still have values
+				tt.WriteRow([]termtable.Field{
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewStringField(clsSelectorElements[k]),
+					termtable.NewStringField(lcpSelectorElements[k]),
+				})
+			case k >= len(lcpSelectorElements) && k < len(clsSelectorElements):
+				//CLS still has values
+				tt.WriteRow([]termtable.Field{
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewStringField(clsSelectorElements[k]),
+					termtable.NewEmptyField(),
+				})
+			case k < len(lcpSelectorElements) && k >= len(clsSelectorElements):
+				// LCP still have values
+				tt.WriteRow([]termtable.Field{
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewEmptyField(),
+					termtable.NewStringField(lcpSelectorElements[k]),
 				})
 			}
-			newHttp.ExtraHeaders = &extraHeaders
 		}
-		reportConfig.Http = &newHttp
-	}
 
-	if cli.RunAsync {
-		// Create async report
-		report, err := c.CreateAsyncReport(reportConfig)
-		if err != nil {
-			log.Fatalf("Could not CreateAsyncReport: ", err)
-		}
-		fmt.Println(report)
-	} else {
-		// Create sync report
-		report, err := c.CreateSyncReport(reportConfig)
-		if err != nil {
-			log.Fatalf("Could not CreateAsyncReport: ", err)
-		}
-		fmt.Println(report)
-	}
+		tt.WriteRowDivider('-')
 
+	}
+	return highestBudgetLevel
 }
 
-func cliCheck() error {
-	switch cli.LogLevel {
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-	case "info":
-		log.SetLevel(log.InfoLevel)
-	case "debug":
-		log.SetLevel(log.DebugLevel)
+func maxInt(a, v int) int {
+	if a > v {
+		return a
+	}
+	return v
+}
+
+var (
+	green  = color.New(color.FgGreen)
+	yellow = color.New(color.FgYellow)
+	red    = color.New(color.FgRed)
+	white  = color.New(color.FgWhite)
+)
+
+func compareValueAgainstBudget(value int32, budget vfrogapi.PerformanceBudget) (*color.Color, int) {
+	if budget.Mode == nil || *budget.Mode == vfrogapi.Above {
+		// Check above values
+		switch {
+		case value < budget.Warning:
+			// all alright
+			return green, 0
+		case value >= budget.Warning && value < budget.Error:
+			return yellow, 1
+		default:
+			return red, 2
+		}
+	}
+	// Check below values
+	switch {
+	case value > budget.Warning:
+		// all alright
+		return green, 0
+	case value <= budget.Warning && value > budget.Error:
+		return yellow, 1
 	default:
-		return fmt.Errorf("invalid LOG_LEVEL: %q", cli.LogLevel)
+		return red, 2
 	}
 
-	if (cli.BasicAuthUsername == "" && cli.BasicAuthPassword != "") || (cli.BasicAuthUsername != "" && cli.BasicAuthPassword == "") {
-		return fmt.Errorf("both BASIC_AUTH_PASSWORD and BASIC_AUTH_USERNAME must be configure if one of them is set")
-	}
-	if len(cli.TargetPaths) == 0 {
-		return fmt.Errorf("at least 1 TARGET_PATH must be set")
-	}
-
-	if cli.TargetHost == "" {
-		return fmt.Errorf("env var TARGET_HOST must be set")
-	}
-
-	if len(cli.AllowedCountries) > 0 && len(cli.BlockedCountries) > 0 {
-		return fmt.Errorf("either ALLOWED_COUNTRIES or BlOCKED_COUNTRIES can be set, not both")
-	}
-
-	if strings.HasSuffix(cli.APIBaseUrl, "/") {
-		return fmt.Errorf("either API_BASE_URL must not have '/' suffix")
-	}
-
-	return nil
 }
+
+var vitalFrogHeaderText = color.New(color.FgGreen).SprintFunc()(`                                                                                         
+ _|      _|   _|     _|                  _|   _|_|_|_|                                   
+ _|      _|        _|_|_|_|     _|_|_|   _|   _|         _|  _|_|     _|_|       _|_|_|  
+ _|      _|   _|     _|       _|    _|   _|   _|_|_|     _|_|       _|    _|   _|    _|  
+   _|  _|     _|     _|       _|    _|   _|   _|         _|         _|    _|   _|    _|  
+     _|       _|       _|_|     _|_|_|   _|   _|         _|           _|_|       _|_|_|  
+                                                                                     _|  
+                                                                                 _|_|    `)
