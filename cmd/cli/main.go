@@ -7,6 +7,7 @@ import (
 	"github.com/fatih/color"
 	log "github.com/sirupsen/logrus"
 	"github.com/vitalfrog/termtable"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -27,19 +28,9 @@ func main() {
 	vfAPI := vfrogapi.New(cfg.APIBaseUrl, cfg.APIToken)
 	reportConfig := cfg.ToReportConfig()
 
-	var metadata *vfrogapi.ReportMetadata
-	var reportsChan chan vfrogapi.PerformanceReport
-	if cfg.RunAsync {
-		report, err := vfAPI.CreateAsyncReport(reportConfig)
-		if err != nil {
-			log.Fatalf("Could not CreateAsyncReport: %s", err)
-		}
-		metadata = &report.Metadata
-	} else {
-		metadata, reportsChan, err = vfAPI.CreateSyncReport(reportConfig)
-		if err != nil {
-			log.Fatalf("Could not CreateSyncReport: %s", err)
-		}
+	metadata, err := vfAPI.CreateReport(reportConfig)
+	if err != nil {
+		log.Fatalf("Could not CreateReport: %s", err)
 	}
 
 	if metadata == nil {
@@ -67,7 +58,7 @@ func main() {
 	//
 	// Write performance report table to cli
 	// Only write table if we have sync report
-	if reportsChan != nil {
+	if !cfg.RunAsync {
 		tt := termtable.New(os.Stdout, " | ")
 		tt.WriteHeader([]termtable.HeaderField{
 			{
@@ -107,7 +98,10 @@ func main() {
 		//
 		// Get budgets from channel and write them as table rows
 		// If highestBudgetLevel is 2, return os.Exit(1). To trigger CI failure
-		highestBudgetLevel := writeBudgetRows(tt, reportsChan, performanceBudgets)
+		highestBudgetLevel, err := writeBudgetRows(tt, vfAPI, metadata.Uuid, performanceBudgets)
+		if err != nil {
+			log.Errorf("could not writeBudgetRows: %s", err)
+		}
 		defer func(highestBudgetLevel int) {
 			switch highestBudgetLevel {
 			case 0:
@@ -140,124 +134,142 @@ func main() {
 }
 
 func writeBudgetRows(tt *termtable.TermTable,
-	reportsChan chan vfrogapi.PerformanceReport,
-	performanceBudgets *vfrogapi.PerformanceBudgets) int {
+	vfAPI vfrogapi.Client,
+	uuid string,
+	performanceBudgets *vfrogapi.PerformanceBudgets) (int, error) {
 	highestBudgetLevel := 0
-	for report := range reportsChan {
-		lcp := fmt.Sprintf("%dms", report.LargestContentfulPaint.ValueMs)
-		fid := fmt.Sprintf("%dms", report.MaxPotentialFidMs)
-		cls := fmt.Sprintf("%f", report.CumulativeLayoutShift.Value)
-		serverResponseTime := fmt.Sprintf("%dms", report.ServerResponseTimeMs)
-		interactive := fmt.Sprintf("%dms", report.InteractiveMs)
-
-		lcpColor := white
-		fidColor := white
-		clsColor := white
-		serverResponseTimeColor := white
-		interactiveColor := white
-
-		for _, budget := range performanceBudgets.Budgets {
-			compare := func(value int32) (*color.Color, int) {
-				return compareValueAgainstBudget(value, budget)
-			}
-			var highestBudget int
-			switch budget.Metric {
-			case vfrogapi.PerformanceBudgetMetricLargestContentfulPaintMs:
-				lcpColor, highestBudget = compare(report.LargestContentfulPaint.ValueMs)
-			case vfrogapi.PerformanceBudgetMetricMaxPotentialFidMs:
-				fidColor, highestBudget = compare(report.MaxPotentialFidMs)
-			case vfrogapi.PerformanceBudgetMetricCumulativeLayoutShift:
-				clsColor, highestBudget = compare(int32(report.CumulativeLayoutShift.Value * 100))
-			case vfrogapi.PerformanceBudgetMetricServerResponseTimeMs:
-				serverResponseTimeColor, highestBudget = compare(report.ServerResponseTimeMs)
-			case vfrogapi.PerformanceBudgetMetricInteractiveMs:
-				interactiveColor, highestBudget = compare(report.InteractiveMs)
-			}
-
-			if highestBudget > highestBudgetLevel {
-				highestBudgetLevel = highestBudget
-			}
+	seenReports := map[int32]struct{}{}
+	for {
+		time.Sleep(time.Duration(rand.Intn(5000-1000)+1000) * time.Millisecond)
+		report, err := vfAPI.GetReport(uuid)
+		if err != nil {
+			return -1, fmt.Errorf("could not GetReport: %w", err)
 		}
 
-		tt.WriteRow([]termtable.Field{
-			termtable.NewStringField(report.Path),
-			termtable.NewStringField(report.Country.Code),
-			termtable.NewStringField(string(report.Device.Name)),
-			termtable.NewColorField(lcp, lcpColor),
-			termtable.NewColorField(fid, fidColor),
-			termtable.NewColorField(cls, clsColor),
-			termtable.NewColorField(serverResponseTime, serverResponseTimeColor),
-			termtable.NewColorField(interactive, interactiveColor),
-		})
-
-		lcpSelectorElements := strings.Split(report.LargestContentfulPaint.Element.Selector, ">")
-		for k, v := range lcpSelectorElements {
-			arrow := ">"
-			if k == 0 {
-				arrow = ""
+		for _, report := range report.Data {
+			if _, seen := seenReports[report.Id]; seen {
+				continue
 			}
-			lcpSelectorElements[k] = fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v))
-		}
-		var clsSelectorElements []string
+			seenReports[report.Id] = struct{}{}
 
-		if report.CumulativeLayoutShift.Elements != nil {
-			for _, el := range *report.CumulativeLayoutShift.Elements {
-				elements := strings.Split(el.Selector, ">")
-				for k, v := range elements {
-					arrow := ">"
-					if k == 0 {
-						arrow = ""
-					}
-					clsSelectorElements = append(clsSelectorElements, fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v)))
+			lcp := fmt.Sprintf("%dms", report.LargestContentfulPaint.ValueMs)
+			fid := fmt.Sprintf("%dms", report.MaxPotentialFidMs)
+			cls := fmt.Sprintf("%f", report.CumulativeLayoutShift.Value)
+			serverResponseTime := fmt.Sprintf("%dms", report.ServerResponseTimeMs)
+			interactive := fmt.Sprintf("%dms", report.InteractiveMs)
+
+			lcpColor := white
+			fidColor := white
+			clsColor := white
+			serverResponseTimeColor := white
+			interactiveColor := white
+
+			for _, budget := range performanceBudgets.Budgets {
+				compare := func(value int32) (*color.Color, int) {
+					return compareValueAgainstBudget(value, budget)
+				}
+				var highestBudget int
+				switch budget.Metric {
+				case vfrogapi.PerformanceBudgetMetricLargestContentfulPaintMs:
+					lcpColor, highestBudget = compare(report.LargestContentfulPaint.ValueMs)
+				case vfrogapi.PerformanceBudgetMetricMaxPotentialFidMs:
+					fidColor, highestBudget = compare(report.MaxPotentialFidMs)
+				case vfrogapi.PerformanceBudgetMetricCumulativeLayoutShift:
+					clsColor, highestBudget = compare(int32(report.CumulativeLayoutShift.Value * 100))
+				case vfrogapi.PerformanceBudgetMetricServerResponseTimeMs:
+					serverResponseTimeColor, highestBudget = compare(report.ServerResponseTimeMs)
+				case vfrogapi.PerformanceBudgetMetricInteractiveMs:
+					interactiveColor, highestBudget = compare(report.InteractiveMs)
+				}
+
+				if highestBudget > highestBudgetLevel {
+					highestBudgetLevel = highestBudget
 				}
 			}
-		}
 
-		for k := 0; k < maxInt(len(lcpSelectorElements), len(clsSelectorElements)); k++ {
-			switch {
-			case k < len(lcpSelectorElements) && k < len(clsSelectorElements):
-				// Both still have values
-				tt.WriteRow([]termtable.Field{
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewStringField(clsSelectorElements[k]),
-					termtable.NewStringField(lcpSelectorElements[k]),
-				})
-			case k >= len(lcpSelectorElements) && k < len(clsSelectorElements):
-				//CLS still has values
-				tt.WriteRow([]termtable.Field{
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewStringField(clsSelectorElements[k]),
-					termtable.NewEmptyField(),
-				})
-			case k < len(lcpSelectorElements) && k >= len(clsSelectorElements):
-				// LCP still have values
-				tt.WriteRow([]termtable.Field{
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewEmptyField(),
-					termtable.NewStringField(lcpSelectorElements[k]),
-				})
+			tt.WriteRow([]termtable.Field{
+				termtable.NewStringField(report.Path),
+				termtable.NewStringField(report.Country.Code),
+				termtable.NewStringField(string(report.Device.Name)),
+				termtable.NewColorField(lcp, lcpColor),
+				termtable.NewColorField(fid, fidColor),
+				termtable.NewColorField(cls, clsColor),
+				termtable.NewColorField(serverResponseTime, serverResponseTimeColor),
+				termtable.NewColorField(interactive, interactiveColor),
+			})
+
+			lcpSelectorElements := strings.Split(report.LargestContentfulPaint.Element.Selector, ">")
+			for k, v := range lcpSelectorElements {
+				arrow := ">"
+				if k == 0 {
+					arrow = ""
+				}
+				lcpSelectorElements[k] = fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v))
 			}
+			var clsSelectorElements []string
+
+			if report.CumulativeLayoutShift.Elements != nil {
+				for _, el := range *report.CumulativeLayoutShift.Elements {
+					elements := strings.Split(el.Selector, ">")
+					for k, v := range elements {
+						arrow := ">"
+						if k == 0 {
+							arrow = ""
+						}
+						clsSelectorElements = append(clsSelectorElements, fmt.Sprintf("%s%s%s", termtable.WhiteSpace(k), arrow, strings.TrimSpace(v)))
+					}
+				}
+			}
+
+			for k := 0; k < maxInt(len(lcpSelectorElements), len(clsSelectorElements)); k++ {
+				switch {
+				case k < len(lcpSelectorElements) && k < len(clsSelectorElements):
+					// Both still have values
+					tt.WriteRow([]termtable.Field{
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewStringField(clsSelectorElements[k]),
+						termtable.NewStringField(lcpSelectorElements[k]),
+					})
+				case k >= len(lcpSelectorElements) && k < len(clsSelectorElements):
+					//CLS still has values
+					tt.WriteRow([]termtable.Field{
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewStringField(clsSelectorElements[k]),
+						termtable.NewEmptyField(),
+					})
+				case k < len(lcpSelectorElements) && k >= len(clsSelectorElements):
+					// LCP still have values
+					tt.WriteRow([]termtable.Field{
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewEmptyField(),
+						termtable.NewStringField(lcpSelectorElements[k]),
+					})
+				}
+			}
+
+			tt.WriteRowDivider('-')
+
 		}
-
-		tt.WriteRowDivider('-')
-
+		if report.Metadata.Finished != nil {
+			break
+		}
 	}
-	return highestBudgetLevel
+	return highestBudgetLevel, nil
 }
 
 func maxInt(a, v int) int {

@@ -43,11 +43,6 @@ const (
 	Below PerformanceBudgetMode = "below"
 )
 
-// AsyncReport defines model for AsyncReport.
-type AsyncReport struct {
-	Metadata ReportMetadata `json:"metadata"`
-}
-
 // Basic auth credentials to configure
 type BasicAuth struct {
 	Password string `json:"password"`
@@ -75,16 +70,6 @@ type CountriesMode string
 type Country struct {
 	Code string  `json:"code"`
 	Name *string `json:"name,omitempty"`
-}
-
-// CreateNewReportBody defines model for CreateNewReportBody.
-type CreateNewReportBody struct {
-	// Run the report async and directly return with a 202
-	Async  bool         `json:"async"`
-	Config ReportConfig `json:"config"`
-
-	// Return the response as jsonl. Allows to shwo results already while run is not finished. Only works for sync report
-	Jsonl bool `json:"jsonl"`
 }
 
 // CumulativeLayoutShift defines model for CumulativeLayoutShift.
@@ -205,6 +190,7 @@ type PerformanceReport struct {
 	Device                 Device                 `json:"device"`
 	FirstContentfulPaint   FirstContentfulPaint   `json:"first_contentful_paint"`
 	FirstMeaningfulPaintMs int32                  `json:"first_meaningful_paint_ms"`
+	Id                     int32                  `json:"id"`
 	InteractiveMs          int32                  `json:"interactive_ms"`
 	LargestContentfulPaint LargestContentfulPaint `json:"largest_contentful_paint"`
 	MaxPotentialFidMs      int32                  `json:"max_potential_fid_ms"`
@@ -213,6 +199,12 @@ type PerformanceReport struct {
 	ServerResponseTimeMs   int32                  `json:"server_response_time_ms"`
 	SpeedIndexMs           int32                  `json:"speed_index_ms"`
 	TotalBlockingTimeMs    int32                  `json:"total_blocking_time_ms"`
+}
+
+// Report defines model for Report.
+type Report struct {
+	Data     []PerformanceReport `json:"data"`
+	Metadata ReportMetadata      `json:"metadata"`
 }
 
 // ReportConfig defines model for ReportConfig.
@@ -240,15 +232,10 @@ type ReportMetadata struct {
 	Config ReportConfig `json:"config"`
 
 	// Cost in credits for this report
-	Cost    int32     `json:"cost"`
-	Created time.Time `json:"created"`
-	Uuid    string    `json:"uuid"`
-}
-
-// SyncReport defines model for SyncReport.
-type SyncReport struct {
-	Data     []PerformanceReport `json:"data"`
-	Metadata ReportMetadata      `json:"metadata"`
+	Cost     int32      `json:"cost"`
+	Created  time.Time  `json:"created"`
+	Finished *time.Time `json:"finished,omitempty"`
+	Uuid     string     `json:"uuid"`
 }
 
 // Target defines model for Target.
@@ -259,7 +246,7 @@ type Target struct {
 }
 
 // PostReportsJSONBody defines parameters for PostReports.
-type PostReportsJSONBody = CreateNewReportBody
+type PostReportsJSONBody = ReportConfig
 
 // PostReportsJSONRequestBody defines body for PostReports for application/json ContentType.
 type PostReportsJSONRequestBody = PostReportsJSONBody
