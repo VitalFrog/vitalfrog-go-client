@@ -191,11 +191,11 @@ func writeBudgetRows(tt *termtable.TermTable,
 				termtable.NewStringField(report.Path),
 				termtable.NewStringField(report.Country.Code),
 				termtable.NewStringField(string(report.Device.Name)),
-				termtable.NewColorField(lcp, lcpColor),
 				termtable.NewColorField(fid, fidColor),
-				termtable.NewColorField(cls, clsColor),
 				termtable.NewColorField(serverResponseTime, serverResponseTimeColor),
 				termtable.NewColorField(interactive, interactiveColor),
+				termtable.NewColorField(cls, clsColor),
+				termtable.NewColorField(lcp, lcpColor),
 			})
 
 			lcpSelectorElements := strings.Split(report.LargestContentfulPaint.Element.Selector, ">")
