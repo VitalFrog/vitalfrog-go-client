@@ -109,7 +109,7 @@ func main() {
 			case 1:
 				color.New(color.FgYellow).Print("You have a few metrics which you should look at as they are in the warning state. Please check above table.")
 			case 2:
-				color.New(color.FgRed).Print("Got at least one metric which is not within an acceptable performance budget. Please check above table")
+				color.New(color.FgRed).Print("Got at least one metric which is not within an acceptable performance budget. Please check above table. (Marked with '✖')")
 				os.Exit(1)
 			}
 		}(highestBudgetLevel)
@@ -172,14 +172,29 @@ func writeBudgetRows(tt *termtable.TermTable,
 				switch budget.Metric {
 				case vfrogapi.PerformanceBudgetMetricLargestContentfulPaintMs:
 					lcpColor, highestBudget = compare(report.LargestContentfulPaint.ValueMs)
+					if highestBudget == 2 {
+						lcp = fmt.Sprintf("✖ %s", lcp)
+					}
 				case vfrogapi.PerformanceBudgetMetricMaxPotentialFidMs:
 					fidColor, highestBudget = compare(report.MaxPotentialFidMs)
+					if highestBudget == 2 {
+						fid = fmt.Sprintf("✖ %s", fid)
+					}
 				case vfrogapi.PerformanceBudgetMetricCumulativeLayoutShift:
 					clsColor, highestBudget = compare(int32(report.CumulativeLayoutShift.Value * 100))
+					if highestBudget == 2 {
+						cls = fmt.Sprintf("✖ %s", cls)
+					}
 				case vfrogapi.PerformanceBudgetMetricServerResponseTimeMs:
 					serverResponseTimeColor, highestBudget = compare(report.ServerResponseTimeMs)
+					if highestBudget == 2 {
+						serverResponseTime = fmt.Sprintf("✖ %s", serverResponseTime)
+					}
 				case vfrogapi.PerformanceBudgetMetricInteractiveMs:
 					interactiveColor, highestBudget = compare(report.InteractiveMs)
+					if highestBudget == 2 {
+						interactive = fmt.Sprintf("✖ %s", interactive)
+					}
 				}
 
 				if highestBudget > highestBudgetLevel {
