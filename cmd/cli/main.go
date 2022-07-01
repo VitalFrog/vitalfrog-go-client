@@ -139,10 +139,16 @@ func writeBudgetRows(tt *termtable.TermTable,
 	performanceBudgets *vfrogapi.PerformanceBudgets) (int, error) {
 	highestBudgetLevel := 0
 	seenReports := map[int32]struct{}{}
+	errCount := 0
 	for {
 		time.Sleep(time.Duration(rand.Intn(5000-1000)+1000) * time.Millisecond)
 		report, err := vfAPI.GetReport(uuid)
 		if err != nil {
+			errCount++
+			if errCount <= 5 {
+				log.Errorf("could not GetReport: %w", err)
+				continue
+			}
 			return -1, fmt.Errorf("could not GetReport: %w", err)
 		}
 
